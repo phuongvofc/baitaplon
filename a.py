@@ -1,82 +1,79 @@
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import time
 import pytesseract
 from PIL import Image
+import requests
+from io import BytesIO
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 import schedule
-import time
 
-# Đường dẫn tới thư mục cài đặt tesseract (có thể thay đổi nếu không phải là mặc định)
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'  # Cập nhật đúng đường dẫn Tesseract của bạn
+# Đường dẫn tới tesseract OCR trên máy
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-# Khởi tạo trình duyệt
-def start_browser():
-    options = webdriver.ChromeOptions()
-    # Tắt chế độ headless để có thể nhìn thấy trình duyệt
-    # options.add_argument("--headless")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    return driver
+BIEN_SO = "30A12345"               # <-- Thay biển số xe thật ở đây
+LOAI_PHUONG_TIEN = "Ô tô"          # "Ô tô" hoặc "Xe máy"
 
-# Lấy mã captcha và giải mã
-def get_captcha(driver):
-    try:
-        captcha_image = driver.find_element(By.ID, "captchaImage")
-        captcha_image.screenshot("captcha.png")  # Lưu ảnh captcha
-        image = Image.open("captcha.png")
-        captcha_text = pytesseract.image_to_string(image)  # Giải mã captcha
-        return captcha_text.strip()
-    except Exception as e:
-        print(f"Không thể lấy mã captcha: {e}")
-        return None
-
-# Kiểm tra phạt nguội
-def check_fine(license_plate, vehicle_type):
-    driver = start_browser()
-
-    try:
-        # Mở trang web CSGT
-        driver.get("https://www.csgt.vn/tra-cuu-phuong-tien-vi-pham.htm")
-        
-        # Đợi cho trang web tải xong và hiển thị các phần tử cần thiết
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "bienSoXe")))
-
-        # Nhập biển số xe và chọn loại phương tiện
-        driver.find_element(By.ID, "bienSoXe").send_keys(license_plate)
-        driver.find_element(By.ID, "loaiPhuongTien").send_keys(vehicle_type)
-
-        # Lấy mã captcha và nhập vào ô captcha
-        captcha_text = get_captcha(driver)
-        if captcha_text:
-            driver.find_element(By.ID, "captchaInput").send_keys(captcha_text)
-
-        # Nhấn nút tìm kiếm
-        driver.find_element(By.ID, "btnSearch").click()
-
-        # Đợi kết quả và kiểm tra phạt nguội
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "result")))
-        result = driver.find_element(By.CLASS_NAME, "result")
-        print(f"Phạt nguội: {result.text}")
-
-    except Exception as e:
-        print(f"Đã xảy ra lỗi khi kiểm tra phạt nguội: {e}")
+def check_fines():
+    print(">>> Bắt đầu kiểm tra phạt nguội...\n")
     
+    options = Options()
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument("--headless")  # chạy ẩn trình duyệt (nếu muốn hiển thị thì xóa dòng này)
+    options.add_argument("--disable-gpu")
+
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
+    try:
+        driver.get("https://www.csgt.vn/tra-cuu-phuong-tien-vi-pham.html")
+
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "code")))
+        driver.find_element(By.ID, "code").send_keys(BIEN_SO)
+
+        select = Select(driver.find_element(By.ID, "vehicleType"))
+        select.select_by_visible_text(LOAI_PHUONG_TIEN)
+
+        # Lấy ảnh captcha
+        captcha_img = driver.find_element(By.ID, "captchaimg")
+        src = captcha_img.get_attribute("src")
+        img_bytes = requests.get(src).content
+        img = Image.open(BytesIO(img_bytes))
+
+        # Giải mã captcha
+        captcha_text = pytesseract.image_to_string(img, config='--psm 8').strip()
+        captcha_text = ''.join(filter(str.isalnum, captcha_text))[:6]
+        print("Giải mã Captcha:", captcha_text)
+
+        driver.find_element(By.ID, "id_captcha_code").send_keys(captcha_text)
+        driver.find_element(By.XPATH, "//button[contains(text(),'Tra cứu')]").click()
+
+        time.sleep(3)
+        page_source = driver.page_source.lower()
+
+        if "không tìm thấy kết quả" in page_source:
+            print("✅ Không có phạt nguội.\n")
+        else:
+            print("⚠️ CÓ THỂ có kết quả phạt nguội. Kiểm tra lại trang web!\n")
+
+    except Exception as e:
+        print("❌ Lỗi khi kiểm tra phạt nguội:", e)
+
     finally:
         driver.quit()
 
-# Lên lịch chạy tự động
-def job():
-    print("Đang kiểm tra phạt nguội...")
-    check_fine("29A-12345", "Ô tô")  # Thay "29A-12345" và "Ô tô" bằng thông tin phương tiện của bạn
+# Lên lịch chạy lúc 6h sáng và 12h trưa mỗi ngày
+schedule.every().day.at("06:00").do(check_fines)
+schedule.every().day.at("12:00").do(check_fines)
 
-# Thiết lập lịch trình chạy mỗi ngày lúc 6:00 AM và 12:00 PM
-schedule.every().day.at("22:43").do(job)
-schedule.every().day.at("12:00").do(job)
+print("⏰ Đang chờ đến 06:00 và 12:00 để tự động kiểm tra...")
 
-# Chạy lịch trình
+# Vòng lặp chạy mãi
 while True:
     schedule.run_pending()
     time.sleep(1)
